@@ -1,0 +1,17 @@
+# 核心 AI Agent 框架
+langchain
+langchain-community
+
+# 本地模型串接
+ollama
+
+# 網頁爬蟲與資料處理
+requests
+beautifulsoup4
+lxml
+
+# 向量資料庫 (後續 RAG 會用到)
+chromadb
+
+# 環境變數管理 (保護你的 API Key)
+python-dotenv
