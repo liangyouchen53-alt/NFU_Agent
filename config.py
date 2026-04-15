@@ -1,9 +1,9 @@
 import os
 
-DATA_PATH = "data/"
-DB_PATH = "vector_db"
-MODEL_NAME = "kenneth85/llama-3-taiwan"
+DATA_DIR = "data/"
+DB_PATH = "faiss_index" 
+MODEL_NAME = "kenneth85/llama-3-taiwan" 
+EMBED_MODEL = "nomic-embed-text" 
 
-# 確保資料夾存在
-if not os.path.exists(DATA_PATH):
-    os.makedirs(DATA_PATH)
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)

@@ -1,42 +1,50 @@
-# brain.py
 import ollama
 from config import MODEL_NAME
-from tools import get_current_time, web_search_optimized
+from tools import get_current_time
 
-def ask_ai(query, vector_db):
+def ask_ai(query, vector_db, chat_history, user_year="114"):
     current_time_info = get_current_time()
+    retriever = vector_db.as_retriever(search_kwargs={"k": 3}) if vector_db else None
     
-    # 1. 檢索 PDF
-    pdf_context = ""
-    if vector_db:
-        results = vector_db.similarity_search(query, k=3)
-        pdf_context = "\n\n".join([doc.page_content for doc in results])
-    
-    # 2. 判斷是否搜尋
-    web_context = ""
-    time_keywords = ["今天", "現在", "禮拜幾", "星期幾", "日期"]
-    if any(word in query for word in time_keywords):
-        web_context = f"【系統校時】：現在確切時間為 {current_time_info}。"
-    elif len(pdf_context.strip()) < 50:
-        print("🔍 助教正在上網打聽...")
-        web_context = web_search_optimized(query)
+    is_roger_lore = any(k in query.lower() for k in ["住哪", "生日", "事蹟", "黑歷史", "羅晟原", "公館路"])
+    is_school_info = any(k in query for k in ["學分", "畢業", "門檻", "必修", "選修", "英文", "證照"])
+    is_date_query = any(k in query for k in ["幾號", "日期", "什麼時候", "考試"])
 
-    # 3. 組合 Prompt
+    context_list = []
+    if retriever:
+        if is_roger_lore:
+            res = retriever.invoke(query, filter={"year": "roger"})
+            context_list.extend([doc.page_content for doc in res])
+        if is_school_info or (not is_roger_lore and not is_date_query):
+            res = retriever.invoke(query, filter={"year": user_year})
+            context_list.extend([doc.page_content for doc in res])
+        if is_date_query:
+            res = retriever.invoke(query, filter={"year": "all"})
+            context_list.extend([doc.page_content for doc in res])
+
+    final_context = "\n\n".join(context_list)
+
     system_prompt = f"""
-    你現在是虎科大專業助教「麻吉」。
-    【絕對事實】：現在是 {current_time_info}。
-    【PDF資料】：{pdf_context}
-    【網路情報】：{web_context}
+    【你的身分】：虎科大資工系最北爛的學長「羅傑 Roger」。
+    【當前時間】：{current_time_info}
     
-    請優先信任系統時間與 PDF。若使用網路資訊請註明。語氣要像台灣大學生。
+    【絕對指令】：
+    1. 嚴禁編造數據！回答必須完全參考下方的資料。若資料說 132 學分，絕對不能說 128。
+    2. 你的回答直接進入主題，不要再說「傑寶等等...」，因為讀取畫面已經顯示過了。
+    3. 保持北爛口氣，絕對不准道歉。常用詞：妥當啦、哭啊、55555。
+
+    【參考資料】：
+    {final_context if final_context else "（沒資料，叫他自己去餐餐自由配啦）"}
     """
     
+    messages = [{'role': 'system', 'content': system_prompt}]
+    messages.extend(chat_history[-3:]) 
+    messages.append({'role': 'user', 'content': query})
+
     response = ollama.chat(
         model=MODEL_NAME,
-        messages=[
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': query}
-        ],
-        options={'temperature': 0.3}
+        messages=messages,
+        options={'temperature': 0.7} 
     )
+    
     return response['message']['content']
