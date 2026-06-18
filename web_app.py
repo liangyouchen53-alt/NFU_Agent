@@ -1,80 +1,96 @@
-import streamlit as st
-from vector_engine import initialize_vector_db
-from brain import ask_ai
-from tools import get_current_time
+# web_app.py
 import os
+import streamlit as st
+from langchain_community.vectorstores import FAISS
+from langchain_ollama import OllamaEmbeddings
 
-# --- 1. 頁面設定 ---
-st.set_page_config(page_title="虎科資工學長 - 羅傑", page_icon="💻", layout="wide")
+from config import EMBED_MODEL, DB_PATH
+from agent_brain import ask_ai_agent
+from tools import get_current_time
 
-# 強制讓對話框撐滿寬度的 CSS (如果你還是想要全螢幕效果的話)
-st.markdown("""
-    <style>
-    .block-container {
-        max-width: 100% !important;
-        padding: 2rem 5rem !important;
-    }
-    .stChatMessage {
-        width: 100% !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+@st.cache_resource
+def load_my_vector_db():
+    """
+    快取 FAISS 索引，防止每次 Rerun 重複讀取硬碟，修復 NameError 缺陷。
+    """
+    embeddings = OllamaEmbeddings(
+        model=EMBED_MODEL, 
+        base_url="http://127.0.0.1:11434"
+    )
+    
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError(f"找不到本地向量庫路徑: '{DB_PATH}'，請先執行 `vector_engine.py` 建立索引。")
+        
+    vector_db = FAISS.load_local(
+        DB_PATH, 
+        embeddings, 
+        allow_dangerous_deserialization=True
+    )
+    return vector_db
 
-# ✅ 修改這裡：對應你的 JPG 檔名
-ROGER_AVATAR_PATH = "08740240-ca23-11ed-b8fe-8486d07069f5.jpg" 
+try:
+    db = load_my_vector_db()
+except Exception as e:
+    st.error(f"❌ 向量資料庫（DB）載入失敗！")
+    st.code(str(e))
+    db = None
 
-# 檢查檔案是否存在，否則退回到機器人圖標
-ROGER_AVATAR = ROGER_AVATAR_PATH if os.path.exists(ROGER_AVATAR_PATH) else "🤖"
-USER_AVATAR = "🧑‍💻"
 
-# --- 2. 初始化 Session State ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+st.set_page_config(page_title="虎科大資工系 AI 萬事通", page_icon="🎓", layout="centered")
 
-if "db_retriever" not in st.session_state:
-    with st.spinner("📦 羅傑正在啟動..."):
-        st.session_state.db_retriever = initialize_vector_db()
+current_time_str = get_current_time()
+st.title("🎓 虎科大資工系 AI 萬事通")
+st.caption(f"📅 系統時間：{current_time_str}")
 
-# --- 3. 側邊欄 UI ---
 with st.sidebar:
-    st.title("💻 系統資訊")
-    
-    # 檢查頭貼路徑
-    if not os.path.exists(ROGER_AVATAR_PATH):
-        st.error(f"⚠️ 找不到圖片：{ROGER_AVATAR_PATH}")
-    else:
-        st.success("✅ 羅傑頭貼已就緒")
-        st.image(ROGER_AVATAR_PATH, width=100) # 在側邊欄預覽一下
-    
-    st.info(f"📅 當前系統時間：\n{get_current_time()}")
-    
-    user_year = st.selectbox("📂 你的入學學年度:", ["111", "112", "113", "114"], index=3)
-    
-    if st.button("🗑️ 清除對話紀錄"):
-        st.session_state.messages = []
-        st.rerun()
+    st.header("⚙️ 系統設定")
+    user_year = st.selectbox("請選擇你的入學學年度：", ["111", "112", "113", "114"], index=3)
+    st.markdown("---")
+    st.markdown("### 💡 羅傑學長叮嚀")
+    st.info("\有問題快問，學長等一下還要趕著去排隊買大吉祥香豆腐！")
 
-# --- 4. 主畫面對話邏輯 ---
-st.title("💬 虎科資工學長 - 羅傑")
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {
+            "role": "assistant", 
+            "content": "學弟妹好！我是資工系辦助教「羅傑學長」，選課、畢業門檻、還是要找哪個教授，問我就對了！"
+        }
+    ]
+
+if "chat_history_clean" not in st.session_state:
+    st.session_state.chat_history_clean = []
 
 for msg in st.session_state.messages:
-    current_avatar = ROGER_AVATAR if msg["role"] == "assistant" else USER_AVATAR
-    with st.chat_message(msg["role"], avatar=current_avatar):
-        st.markdown(msg["content"])
+    avatar_icon = "😎" if msg["role"] == "assistant" else "👤"
+    with st.chat_message(msg["role"], avatar=avatar_icon):
+        st.write(msg["content"])
 
-if prompt := st.chat_input("想問什麼？"):
+if prompt := st.chat_input("有什麼選課或畢業規定要問羅傑學長？"):
+    if db is None:
+        st.error("⚠️ 系統未就緒：向量資料庫未成功定義或載入。")
+        st.stop()
+
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user", avatar=USER_AVATAR):
-        st.markdown(prompt)
+    with st.chat_message("user", avatar="👤"):
+        st.write(prompt)
 
-    with st.chat_message("assistant", avatar=ROGER_AVATAR):
-        # ✅ 讀取中會顯示這段話，回答內不要再重複
-        with st.spinner("傑寶等等，羅傑來給你找答案..."):
-            res = ask_ai(
-                prompt, 
-                st.session_state.db_retriever, 
-                st.session_state.messages[:-1], 
-                user_year=user_year
+    with st.chat_message("assistant", avatar="😎"):
+        with st.spinner("學長正在翻箱倒櫃幫你查資料..."):
+            ans, elapsed, tool_log = ask_ai_agent(
+                query=prompt,
+                vector_db=db,
+                chat_history=st.session_state.chat_history_clean
             )
-            st.markdown(res)
-            st.session_state.messages.append({"role": "assistant", "content": res})
+            
+            st.write(ans)
+            st.caption(f"⏱️ 思考耗時: {elapsed} 秒")
+            
+            if tool_log:
+                with st.expander("⚙️ 查看羅傑學長的自主推理工具鏈 (Tool Log)"):
+                    for log in tool_log:
+                        st.markdown(f"**第 {log['turn'] + 1} 輪決策** ── 呼叫手腳工具：`{log['tool']}`")
+                        st.json(log['args'])
+
+    st.session_state.messages.append({"role": "assistant", "content": ans})
+    st.session_state.chat_history_clean.append({"role": "user", "content": prompt})
+    st.session_state.chat_history_clean.append({"role": "assistant", "content": ans})

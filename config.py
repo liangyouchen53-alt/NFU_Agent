@@ -1,9 +1,10 @@
 import os
 
-# 模型名稱與 README.md 指令對應
 DATA_DIR = "data/"
 DB_PATH = "faiss_index" 
-MODEL_NAME = "kenneth85/llama-3-taiwan" 
+#MODEL_NAME = "kenneth85/llama-3-taiwan" 
+#MODEL_NAME = "llama3.2:3b"
+MODEL_NAME = "llama3.1:8b"
 EMBED_MODEL = "nomic-embed-text" 
 
 if not os.path.exists(DATA_DIR):

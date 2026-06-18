@@ -5,6 +5,17 @@ from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
 from config import EMBED_MODEL, DB_PATH, DATA_DIR
 
+# 🔧 修改一：針對不同資料夾設定不同的 chunk_size
+# professors.md 是表格型資料，切太小會破壞一筆教授資料的完整性
+CHUNK_CONFIG = {
+    "professors":  {"chunk_size": 2000, "chunk_overlap": 100},  # 教授表格，保持完整一筆
+    "111":         {"chunk_size": 1000,  "chunk_overlap": 150},  # 畢業規定，數字不能切斷
+    "112":         {"chunk_size": 1000,  "chunk_overlap": 150},
+    "113":         {"chunk_size": 1000,  "chunk_overlap": 150},
+    "114":         {"chunk_size": 1000,  "chunk_overlap": 150},
+    "default":     {"chunk_size": 1000,  "chunk_overlap": 150},
+}
+
 def create_vector_db():
     all_documents = []
     if not os.path.exists(DATA_DIR):
@@ -18,7 +29,6 @@ def create_vector_db():
         tag = "roger" if sub_dir == "roger" else ("all" if sub_dir == "calendar" else sub_dir)
         
         try:
-            # ✅ 使用 TextLoader 並強制 utf-8 編碼，防止中文讀取錯誤導致數字亂跳
             loader = DirectoryLoader(
                 folder_path, 
                 glob="**/*.md", 
@@ -28,18 +38,23 @@ def create_vector_db():
             docs = loader.load()
             for doc in docs:
                 doc.metadata["year"] = tag
-            all_documents.extend(docs)
-            print(f"✅ 已讀取 [{sub_dir}]，標籤: {tag}")
+            
+            # 🔧 修改一：依資料夾套用不同切割設定
+            cfg = CHUNK_CONFIG.get(sub_dir, CHUNK_CONFIG["default"])
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=cfg["chunk_size"],
+                chunk_overlap=cfg["chunk_overlap"]
+            )
+            split = splitter.split_documents(docs)
+            all_documents.extend(split)
+            print(f"✅ 已讀取 [{sub_dir}]，標籤: {tag}，chunk數: {len(split)}")
         except Exception as e:
             print(f"❌ 讀取 {sub_dir} 失敗: {e}")
-
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    split_docs = text_splitter.split_documents(all_documents)
 
     embeddings = OllamaEmbeddings(model=EMBED_MODEL, base_url="http://127.0.0.1:11434")
     
     try:
-        vector_db = FAISS.from_documents(split_docs, embeddings)
+        vector_db = FAISS.from_documents(all_documents, embeddings)
         vector_db.save_local(DB_PATH)
         print("🚀 向量庫建立完成，妥當啦！")
     except Exception as e:
