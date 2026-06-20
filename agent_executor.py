@@ -1,13 +1,25 @@
 # agent_executor.py
+"""
+工具的「實際執行邏輯」。
+agent_tools_def.py 是給 LLM 看的工具說明書，
+agent_tools.py 是校務連結/期限/處室的資料與比對邏輯，
+這個檔案負責把兩邊串起來，加上 RAG 檢索（畢業規定/教授/校曆）。
+"""
 
-from tools import get_current_time
 from agent_tools import (
     get_school_service_link_logic,
     get_deadline_info_logic,
-    get_office_info_logic
+    get_office_info_logic,
 )
 
+
 def make_tool_executor(vector_db):
+    """
+    傳入 vector_db，回傳一個 dict：
+        工具名稱(str) -> 執行函式(callable)
+    執行函式統一接收一個 dict 參數（從 LLM 給的 arguments 解析出來），回傳字串結果。
+    """
+
     def _retrieve(query: str, k: int, year_filter: str = None) -> list[str]:
         if vector_db is None:
             return []
@@ -62,5 +74,5 @@ def make_tool_executor(vector_db):
         ),
         "get_office_info": lambda args: get_office_info_logic(
             department=args.get("department", "")
-        )
+        ),
     }
