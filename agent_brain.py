@@ -14,6 +14,7 @@ ReAct 風格迴圈：
 
 import ollama
 import json
+import re
 import time
 
 from config import MODEL_NAME
@@ -23,27 +24,94 @@ from agent_tools import get_school_service_link_logic, SCHOOL_LINKS_DB
 from tools import get_current_time
 
 
-def _ensure_link_not_missing(query: str, ai_reply: str) -> str:
-    """
-    安全網：如果使用者問題明確命中某個校務平台關鍵字，
-    但模型最終回覆裡完全沒有出現該平台的網址，就主動把連結補在回覆後面。
-    這是為了防止小模型誤判「不需要呼叫工具」而導致連結整個消失。
-    """
-    if not ai_reply:
-        return ai_reply
+# 用來抓出回覆裡所有「我剛剛幫你補上連結」的提示句（連同它附帶的 markdown 連結跟裸網址），
+# 一併清掉，避免重複呼叫工具或模型自己亂寫導致一句話裡塞好幾個連結。
+_LINK_HINT_PATTERN = re.compile(
+    r"💡\s*(?:對了，)?附上你要的連結[：:]\s*\[[^\]]+\]\(https?://[^\)]+\)"
+    r"(?:\s*\n\s*完整網址[：:]\s*https?://\S+)?",
+)
 
+# 抓所有 markdown 連結 [文字](網址)，整個移除（含文字），因為模型常把這種句子整句寫成
+# 「另外，你也可以嘗試使用『在學證明』關鍵字在校務eCare系統中進行查詢。[在學證明申請系統](...)」
+# 只挖掉網址會留下不通順的殘字，因此連同方框文字一起拿掉。
+_MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\)]+)\)")
+
+# 抓含有「完整網址」字樣、或整句只剩網址前綴詞彙的殘留行，做最後清理
+_TRAILING_BARE_URL_PATTERN = re.compile(r"https?://\S+")
+
+
+def _find_best_link_for_query(query: str):
+    """
+    根據使用者這次的原始問題，找出『最相關的單一連結』。
+    比對策略：key 越長代表越精確（例如「在學證明」比「證明」精確），
+    優先回傳最長、最精確命中的那一筆，避免抓到太寬泛的關鍵字（如「查詢」）。
+    """
     q = query.strip().lower()
-    reply_lower = ai_reply.lower()
+    best_match = None
+    best_key_len = -1
 
     for key, (label, url) in SCHOOL_LINKS_DB.items():
         key_lower = key.lower()
         if key_lower in q or q in key_lower:
-            # 使用者問題命中這個平台，但回覆裡完全沒有這個網址 -> 補上
-            if url.lower() not in reply_lower:
-                ai_reply += f"\n\n💡 對了，附上你要的連結：[{label}]({url})\n完整網址：{url}"
-            break  # 只補第一個命中的，避免一次塞太多連結
+            if len(key_lower) > best_key_len:
+                best_key_len = len(key_lower)
+                best_match = (label, url)
 
-    return ai_reply
+    return best_match
+
+
+def _strip_all_link_traces(text: str) -> str:
+    """
+    把文字裡所有跟『連結/網站』相關的痕跡通通清掉，包含：
+      - markdown 連結 [文字](網址)
+      - 裸網址
+      - 提到網站名稱但被模型瞎掰、不在資料庫裡的句子
+    策略：只要一行含有 markdown 連結或裸網址，這一行整行直接砍掉，
+    不再嘗試「保留説明、只挖網址」，因為模型常把虛構的網站名稱寫進說明句裡，
+    保留那些文字風險比直接砍掉更高。
+    """
+    lines = text.split("\n")
+    kept_lines = []
+    for line in lines:
+        has_link = bool(_MARKDOWN_LINK_PATTERN.search(line)) or bool(_TRAILING_BARE_URL_PATTERN.search(line))
+        if has_link:
+            continue  # 整行砍掉，不保留任何殘留說明文字
+        kept_lines.append(line)
+    return "\n".join(kept_lines)
+
+
+def _finalize_links(query: str, ai_reply: str) -> str:
+    """
+    完全不信任模型自己寫出的任何連結或網站名稱（因為小模型容易瞎掰網址）。
+    做法：
+      1. 把回覆裡所有含連結痕跡的句子整行砍掉，只留下不含連結的描述文字
+      2. 根據『使用者這次的原始問題』比對 SCHOOL_LINKS_DB，找出唯一最相關的官方連結
+      3. 把這個官方連結附加在清理後的文字最後面
+    這樣最終回覆裡只會出現程式碼資料庫驗證過的連結，不會有模型幻覺出來的假網址，
+    也不會出現多個連結混雜在一起的情況。
+    """
+    if not ai_reply:
+        ai_reply = ""
+
+    cleaned = _LINK_HINT_PATTERN.sub("", ai_reply)
+    cleaned = _strip_all_link_traces(cleaned)
+
+    # 整理多餘的空行
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    best_match = _find_best_link_for_query(query)
+
+    if best_match:
+        label, url = best_match
+        if cleaned:
+            cleaned += f"\n\n💡 附上你要的連結：[{label}]({url})\n完整網址：{url}"
+        else:
+            cleaned = f"幫你查到了！\n\n💡 附上你要的連結：[{label}]({url})\n完整網址：{url}"
+    elif not cleaned:
+        # 清理完什麼都沒留下、又沒找到對應連結，給個保底回覆避免回空字串
+        cleaned = "⚠️ 沒有找到對應的校務系統連結，建議直接前往 [校務eCare](https://ecare.nfu.edu.tw/) 查詢，或詢問系辦。"
+
+    return cleaned
 
 
 def ask_ai_agent(query, vector_db, chat_history=None, max_turns=5):
@@ -70,8 +138,9 @@ def ask_ai_agent(query, vector_db, chat_history=None, max_turns=5):
 2. 整合回覆：仔細閱讀工具回傳的內容（Observation），並嚴格遵守下方規範回覆。
 
 【資訊處理死命令】：
-- 🔴 【絕對保留網址】：當工具回傳任何系統的網址連結時，你必須在回覆中以 Markdown 格式 `[系統名稱](網址)` 完整呈現，並把網址原文也單獨列出一次，絕對不可省略、簡化或刪減網址！
+- 🔴 【絕對禁止自己生成連結】：你絕對不可以自己編造、猜測或想像任何網址、網站名稱或連結，包括「國立虎尾科技大學OOO」這類聽起來合理但你不確定真實性的名稱。所有連結資訊只能來自工具回傳的結果，系統會自動處理連結的附加，你只需要專心描述「這項業務可以做什麼、需要注意什麼」就好，不需要自己寫出任何 [文字](網址) 格式或網址字串。
 - 🔴 【事實不可捏造】：針對工具回傳的學分、日期、教授名單，必須逐字對照，查無資料就直說，嚴禁憑空編造。
+- 🟢 【簡潔回覆】：每個問題只針對使用者實際問的那一件事回答，不需要列出多種替代方案或額外建議其他查詢方式，保持簡潔扼要。
 - 🟢 【排版清晰】：資訊量較大時，請善用繁體中文的條列式（Bullet points）或粗體標註重點。
 - 🟢 【語言規定】：無論使用者用任何語言提問，都只能用「繁體中文」回答，不可使用簡體中文、英文或其他語言。
 - 🟢 【學長語氣】：保持專業、熱心但不失幽默的學長口吻。
@@ -103,7 +172,7 @@ def ask_ai_agent(query, vector_db, chat_history=None, max_turns=5):
         # 模型認為資訊已齊全，直接回覆（或這是強制不給工具的最後一輪）
         if not tool_calls:
             elapsed = round(time.time() - start_time, 2)
-            final_reply = _ensure_link_not_missing(query, msg.get("content", ""))
+            final_reply = _finalize_links(query, msg.get("content", ""))
             return final_reply, elapsed, tool_log
 
         # 模型發出 tool call，依序執行並把結果塞回 messages
